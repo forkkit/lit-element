@@ -649,7 +649,7 @@ suite('Static get styles', () => {
 
   test('can extend and augment `styles`', async () => {
     const base = generateElementName();
-    customElements.define(base, class extends LitElement {
+    class BaseClass extends LitElement {
       static get styles() {
         return css`div {
           border: 2px solid blue;
@@ -660,10 +660,10 @@ suite('Static get styles', () => {
         return htmlWithStyles`
         <div>Testing1</div>`;
       }
-    });
-
+    }
+    customElements.define(base, BaseClass);
     const sub = generateElementName();
-    customElements.define(sub, class extends customElements.get(base) {
+    customElements.define(sub, class extends BaseClass {
       static get styles() {
         return [
           super.styles,
@@ -671,7 +671,7 @@ suite('Static get styles', () => {
             display: block;
             border: 3px solid blue;
           }`
-        ];
+        ] as any;
       }
 
       render() {
@@ -682,7 +682,7 @@ suite('Static get styles', () => {
     });
 
     const subsub = generateElementName();
-    customElements.define(subsub, class extends customElements.get(sub) {
+    customElements.define(subsub, class extends BaseClass {
       static get styles() {
         return [
           super.styles,
@@ -690,7 +690,7 @@ suite('Static get styles', () => {
             display: block;
             border: 4px solid blue;
           }`
-        ];
+        ] as any;
       }
 
       render() {
@@ -719,7 +719,7 @@ suite('Static get styles', () => {
 
   test('can extend and override `styles`', async () => {
     const base = generateElementName();
-    customElements.define(base, class extends LitElement {
+    class BaseClass extends LitElement {
       static get styles() {
         return css`div {
           border: 2px solid blue;
@@ -730,10 +730,11 @@ suite('Static get styles', () => {
         return htmlWithStyles`
         <div>Testing1</div>`;
       }
-    });
+    }
+    customElements.define(base, BaseClass);
 
     const sub = generateElementName();
-    customElements.define(sub, class extends customElements.get(base) {
+    customElements.define(sub, class extends BaseClass {
       static get styles() {
         return css`div {
           border: 3px solid blue;
@@ -742,7 +743,7 @@ suite('Static get styles', () => {
     });
 
     const subsub = generateElementName();
-    customElements.define(subsub, class extends customElements.get(sub) {
+    customElements.define(subsub, class extends BaseClass {
       static get styles() {
         return css`div {
           border: 4px solid blue;
@@ -768,12 +769,13 @@ suite('Static get styles', () => {
 
   test('elements should inherit `styles` by default', async () => {
     const base = generateElementName();
-    customElements.define(base, class extends LitElement {
+    class BaseClass extends LitElement {
       static styles = css`div {border: 4px solid black;}`;
-    });
+    }
+    customElements.define(base, BaseClass);
 
     const sub = generateElementName();
-    customElements.define(sub, class extends customElements.get(base) {
+    customElements.define(sub, class extends BaseClass {
       render() {
         return htmlWithStyles`<div></div>`;
       }
@@ -788,6 +790,47 @@ suite('Static get styles', () => {
         '4px');
   });
 
+  test('element class only gathers styles once', async () => {
+    const base = generateElementName();
+    let getStylesCounter = 0;
+    let stylesCounter = 0;
+    customElements.define(base, class extends LitElement {
+      static getStyles() {
+        getStylesCounter++;
+        return super.getStyles();
+      }
+
+      static get styles() {
+        stylesCounter++;
+        return css`:host {
+          border: 10px solid black;
+        }`;
+      }
+      render() {
+        return htmlWithStyles`<div>styled</div>`;
+      }
+    });
+    const el1 = document.createElement(base);
+    const el2 = document.createElement(base);
+    container.appendChild(el1);
+    container.appendChild(el2);
+    await Promise.all([
+      (el1 as LitElement).updateComplete,
+      (el2 as LitElement).updateComplete
+    ]);
+    assert.equal(
+        getComputedStyle(el1).getPropertyValue('border-top-width').trim(),
+        '10px',
+        'el1 styled correctly');
+    assert.equal(
+        getComputedStyle(el2).getPropertyValue('border-top-width').trim(),
+        '10px',
+        'el2 styled correctly');
+    assert.equal(
+        stylesCounter, 1, 'styles property should only be accessed once');
+    assert.equal(getStylesCounter, 1, 'getStyles() should be called once');
+  });
+
   test(
       '`CSSResult` allows for String type coercion via toString()',
       async () => {
@@ -797,6 +840,144 @@ suite('Static get styles', () => {
         // document.body level.
         const bodyStyles = `${cssModule}`;
         assert.equal(bodyStyles, '.my-module { color: yellow; }');
+      });
+
+  test(
+      'Styles are not removed if the first rendered value is undefined.',
+      async () => {
+        const localName = generateElementName();
+
+        class SomeCustomElement extends LitElement {
+          static styles = css`:host {border: 4px solid black;}`;
+
+          renderUndefined: boolean;
+
+          constructor() {
+            super();
+            this.renderUndefined = true;
+          }
+
+          static get properties() {
+            return {
+              renderUndefined: {
+                type: Boolean,
+                value: true,
+              },
+            };
+          }
+
+          render() {
+            if (this.renderUndefined) {
+              return undefined;
+            }
+
+            return htmlWithStyles`Some text.`;
+          }
+        }
+        customElements.define(localName, SomeCustomElement);
+
+        const element = document.createElement(localName) as SomeCustomElement;
+        document.body.appendChild(element);
+
+        await (element as LitElement).updateComplete;
+        assert.equal(
+            getComputedStyle(element)
+                .getPropertyValue('border-top-width')
+                .trim(),
+            '4px');
+
+        element.renderUndefined = false;
+
+        await (element as LitElement).updateComplete;
+        assert.equal(
+            getComputedStyle(element)
+                .getPropertyValue('border-top-width')
+                .trim(),
+            '4px');
+
+        document.body.removeChild(element);
+      });
+
+  const testAdoptedStyleSheets =
+      (window.ShadowRoot) && ('replace' in CSSStyleSheet.prototype);
+  (testAdoptedStyleSheets ? test : test.skip)(
+      'Can return CSSStyleSheet where adoptedStyleSheets are natively supported',
+      async () => {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync('div { border: 4px solid red; }');
+        const normal = css`span { border: 4px solid blue; }`;
+
+        const base = generateElementName();
+        customElements.define(base, class extends LitElement {
+          static styles = [sheet, normal];
+
+          render() {
+            return htmlWithStyles`<div></div><span></span>`;
+          }
+        });
+
+        const el = document.createElement(base);
+        container.appendChild(el);
+        await (el as LitElement).updateComplete;
+        const div = el.shadowRoot!.querySelector('div')!;
+        assert.equal(
+            getComputedStyle(div).getPropertyValue('border-top-width').trim(),
+            '4px');
+
+        const span = el.shadowRoot!.querySelector('span')!;
+        assert.equal(
+            getComputedStyle(span).getPropertyValue('border-top-width').trim(),
+            '4px');
+
+        // When the WC polyfills are included, calling .replaceSync is a noop to
+        // our styles as they're already flattened (so expect 4px). Otherwise,
+        // look for the updated value.
+        const usesAdoptedStyleSheet =
+            (window.ShadyCSS === undefined || window.ShadyCSS.nativeShadow);
+        const expectedValue = usesAdoptedStyleSheet ? '2px' : '4px';
+        sheet.replaceSync('div { border: 2px solid red; }');
+
+        assert.equal(
+            getComputedStyle(div).getPropertyValue('border-top-width').trim(),
+            expectedValue);
+      });
+
+  // Test that when ShadyCSS is enabled (while still having native support for
+  // adoptedStyleSheets), we can return a CSSStyleSheet that will be flattened
+  // and play nice with others.
+  const testShadyCSSWithAdoptedStyleSheetSupport = (window.ShadowRoot) &&
+      ('replace' in CSSStyleSheet.prototype) &&
+      (window.ShadyCSS !== undefined && !window.ShadyCSS.nativeShadow);
+  (testShadyCSSWithAdoptedStyleSheetSupport ? test : test.skip)(
+      'CSSStyleSheet is flattened where ShadyCSS is enabled yet adoptedStyleSheets are supported',
+      async () => {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync('div { border: 4px solid red; }');
+
+        const base = generateElementName();
+        customElements.define(base, class extends LitElement {
+          static styles = sheet;
+
+          render() {
+            return htmlWithStyles`<div></div>`;
+          }
+        });
+
+        const el = document.createElement(base);
+        container.appendChild(el);
+        await (el as LitElement).updateComplete;
+
+        const div = el.shadowRoot!.querySelector('div')!;
+        assert.equal(
+            getComputedStyle(div).getPropertyValue('border-top-width').trim(),
+            '4px');
+
+        // CSSStyleSheet update should fail, as the styles will be flattened.
+        sheet.replaceSync('div { border: 2px solid red; }');
+        assert.equal(
+            getComputedStyle(div).getPropertyValue('border-top-width').trim(),
+            '4px',
+            'CSS should not reflect CSSStyleSheet as it was flattened');
       });
 });
 

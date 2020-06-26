@@ -13,8 +13,11 @@
  */
 
 import {eventOptions, property} from '../../lib/decorators.js';
-import {customElement, html, LitElement, PropertyValues, query, queryAll} from '../../lit-element.js';
+import {customElement, html, LitElement, PropertyValues, query, queryAll, queryAssignedNodes, queryAsync} from '../../lit-element.js';
 import {generateElementName} from '../test-helpers.js';
+
+const flush =
+    window.ShadyDOM && window.ShadyDOM.flush ? window.ShadyDOM.flush : () => {};
 
 // tslint:disable:no-any ok in tests
 
@@ -83,7 +86,7 @@ suite('decorators', () => {
   suite('@customElement', () => {
     test('defines an element', () => {
       const tagName = generateElementName();
-      @customElement(tagName as keyof HTMLElementTagNameMap)
+      @customElement(tagName)
       class C0 extends HTMLElement {
       }
       const DefinedC = customElements.get(tagName);
@@ -321,7 +324,7 @@ suite('decorators', () => {
   });
 
   suite('@query', () => {
-    @customElement(generateElementName() as keyof HTMLElementTagNameMap)
+    @customElement(generateElementName())
     class C extends LitElement {
       @query('#blah') blah?: HTMLDivElement;
 
@@ -354,7 +357,7 @@ suite('decorators', () => {
   });
 
   suite('@queryAll', () => {
-    @customElement(generateElementName() as keyof HTMLElementTagNameMap)
+    @customElement(generateElementName())
     class C extends LitElement {
       @queryAll('div') divs!: NodeList;
 
@@ -389,12 +392,146 @@ suite('decorators', () => {
     });
   });
 
+  suite('@queryAssignedNodes', () => {
+    @customElement('assigned-nodes-el')
+    class D extends LitElement {
+      @queryAssignedNodes() defaultAssigned!: Node[];
+
+      // The `true` on the decorator indicates that results should be flattened.
+      @queryAssignedNodes('footer', true) footerAssigned!: Node[];
+
+      render() {
+        return html`
+          <slot></slot>
+          <slot name="footer"></slot>
+        `;
+      }
+    }
+
+    @customElement('assigned-nodes-el-2')
+    class E extends LitElement {
+      @queryAssignedNodes() defaultAssigned!: Node[];
+
+      @queryAssignedNodes('header') headerAssigned!: Node[];
+
+      render() {
+        return html`
+          <slot name="header"></slot>
+          <slot></slot>
+        `;
+      }
+    }
+
+    // Note, there are 2 elements here so that the `flatten` option of
+    // the decorator can be tested.
+    @customElement(generateElementName())
+    class C extends LitElement {
+      @query('#div1') div!: HTMLDivElement;
+      @query('#div2') div2!: HTMLDivElement;
+      @query('assigned-nodes-el') assignedNodesEl!: D;
+      @query('assigned-nodes-el-2') assignedNodesEl2!: E;
+
+      render() {
+        return html`
+          <assigned-nodes-el><div id="div1">A</div><slot slot="footer"></slot></assigned-nodes-el>
+          <assigned-nodes-el-2><div id="div2">B</div></assigned-nodes-el-2>
+        `;
+      }
+    }
+
+    test('returns assignedNodes for slot', async () => {
+      const c = new C();
+      container.appendChild(c);
+      await c.updateComplete;
+      await c.assignedNodesEl.updateComplete;
+      // Note, `defaultAssigned` does not `flatten` so we test that the property
+      // reflects current state and state when nodes are added or removed.
+      assert.deepEqual(c.assignedNodesEl.defaultAssigned, [c.div]);
+      const child = document.createElement('div');
+      c.assignedNodesEl.appendChild(child);
+      flush();
+      assert.deepEqual(c.assignedNodesEl.defaultAssigned, [c.div, child]);
+      c.assignedNodesEl.removeChild(child);
+      flush();
+      assert.deepEqual(c.assignedNodesEl.defaultAssigned, [c.div]);
+    });
+
+    test(
+        'returns assignedNodes for unnamed slot that is not first slot',
+        async () => {
+          const c = new C();
+          container.appendChild(c);
+          await c.updateComplete;
+          await c.assignedNodesEl.updateComplete;
+          assert.deepEqual(c.assignedNodesEl2.defaultAssigned, [c.div2]);
+        });
+
+    test('returns flattened assignedNodes for slot', async () => {
+      const c = new C();
+      container.appendChild(c);
+      await c.updateComplete;
+      await c.assignedNodesEl.updateComplete;
+      // Note, `defaultAssigned` does `flatten` so we test that the property
+      // reflects current state and state when nodes are added or removed to
+      // the light DOM of the element containing the element under test.
+      assert.deepEqual(c.assignedNodesEl.footerAssigned, []);
+      const child1 = document.createElement('div');
+      const child2 = document.createElement('div');
+      c.appendChild(child1);
+      c.appendChild(child2);
+      flush();
+      assert.deepEqual(c.assignedNodesEl.footerAssigned, [child1, child2]);
+      c.removeChild(child2);
+      flush();
+      assert.deepEqual(c.assignedNodesEl.footerAssigned, [child1]);
+    });
+  });
+
+  suite('@queryAsync', () => {
+    @customElement(generateElementName())
+    class C extends LitElement {
+      @queryAsync('#blah') blah!: Promise<HTMLDivElement>;
+
+      @queryAsync('span') nope!: Promise<HTMLSpanElement|null>;
+
+      @property() foo = false;
+
+      render() {
+        return html`
+          <div>Not this one</div>
+          ${
+            this.foo ? html`<div id="blah" foo>This one</div>` :
+                       html`<div id="blah">This one</div>`}
+        `;
+      }
+    }
+
+    test('returns an element when it exists after update', async () => {
+      const c = new C();
+      container.appendChild(c);
+      let div = await c.blah;
+      assert.instanceOf(div, HTMLDivElement);
+      assert.isFalse(div.hasAttribute('foo'));
+      c.foo = true;
+      div = await c.blah;
+      assert.instanceOf(div, HTMLDivElement);
+      assert.isTrue(div.hasAttribute('foo'));
+    });
+
+    test('returns null when no match', async () => {
+      const c = new C();
+      container.appendChild(c);
+      const span = await c.nope;
+      assert.isNull(span);
+    });
+  });
+
   suite('@eventOptions', () => {
     test('allows capturing listeners', async function() {
       if (!supportsOptions) {
         this.skip();
       }
-      @customElement(generateElementName() as keyof HTMLElementTagNameMap)
+      @customElement(generateElementName())
       class C extends LitElement {
         eventPhase?: number;
 
@@ -422,7 +559,7 @@ suite('decorators', () => {
       if (!supportsOptions) {
         this.skip();
       }
-      @customElement(generateElementName() as keyof HTMLElementTagNameMap)
+      @customElement(generateElementName())
       class C extends LitElement {
         clicked = 0;
 
@@ -451,7 +588,7 @@ suite('decorators', () => {
       if (!supportsPassive) {
         this.skip();
       }
-      @customElement(generateElementName() as keyof HTMLElementTagNameMap)
+      @customElement(generateElementName())
       class C extends LitElement {
         defaultPrevented?: boolean;
 

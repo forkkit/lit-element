@@ -12,8 +12,8 @@
  * http://polymer.github.io/PATENTS.txt
  */
 
-import {property} from '../../lib/decorators.js';
-import {ComplexAttributeConverter, PropertyDeclarations, PropertyValues, UpdatingElement} from '../../lib/updating-element.js';
+import {customElement, property} from '../../lib/decorators.js';
+import {ComplexAttributeConverter, defaultConverter, PropertyDeclaration, PropertyDeclarations, PropertyValues, UpdatingElement} from '../../lib/updating-element.js';
 import {generateElementName} from '../test-helpers.js';
 
 // tslint:disable:no-any ok in tests
@@ -736,7 +736,7 @@ suite('UpdatingElement', () => {
     assert.deepEqual(el.arr, [1, 2, 3, 4]);
   });
 
-  if (Object.getOwnPropertySymbols) {
+  if ((Object as Partial<typeof Object>).getOwnPropertySymbols) {
     test('properties defined using symbols', async () => {
       const zug = Symbol();
 
@@ -1430,6 +1430,40 @@ suite('UpdatingElement', () => {
   });
 
   test(
+      'setting properties in update after calling `super.update` *does* trigger update',
+      async () => {
+        class E extends UpdatingElement {
+          static get properties() {
+            return {foo: {}};
+          }
+          promiseFulfilled = false;
+          foo = 0;
+          updateCount = 0;
+          updatedText = '';
+
+          update(props: PropertyValues) {
+            this.updateCount++;
+            super.update(props);
+            if (this.foo < 1) {
+              this.foo++;
+            }
+          }
+
+          updated() {
+            this.updatedText = `${this.foo}`;
+          }
+        }
+        customElements.define(generateElementName(), E);
+        const el = new E();
+        container.appendChild(el);
+        while (!(await el.updateComplete)) {
+        }
+        assert.equal(el.foo, 1);
+        assert.equal(el.updateCount, 2);
+        assert.equal(el.updatedText, '1');
+      });
+
+  test(
       'setting properties in update reflects to attribute and is included in `changedProperties`',
       async () => {
         class E extends UpdatingElement {
@@ -1770,6 +1804,251 @@ suite('UpdatingElement', () => {
         assert.equal(sub.updatedText, '5');
         assert.equal(sub.getAttribute('foo'), '5');
       });
+
+  test('can provide a default property declaration', async () => {
+    const SpecialNumber = {};
+
+    const myPropertyDeclaration = {
+      type: SpecialNumber,
+      reflect: true,
+      converter: {
+        toAttribute: function(value: unknown, type?: unknown): unknown {
+          switch (type) {
+            case String:
+              return value === undefined ? null : value;
+            default:
+              return defaultConverter.toAttribute!(value, type);
+          }
+        },
+        fromAttribute: function(value: string|null, type?: unknown) {
+          switch (type) {
+            case SpecialNumber:
+              return Number(value) + 10;
+            default:
+              return defaultConverter.fromAttribute!(value, type);
+          }
+        }
+      }
+    };
+
+    @customElement(generateElementName())
+    class E extends UpdatingElement {
+      static createProperty(name: PropertyKey, options: PropertyDeclaration) {
+        // Always mix into defaults to preserve custom converter.
+        options = Object.assign(Object.create(myPropertyDeclaration), options);
+        super.createProperty(name, options);
+      }
+
+      @property() foo = 5;
+
+      @property({type: String}) bar?: string = 'bar';
+    }
+
+    const el = new E();
+    container.appendChild(el);
+    el.setAttribute('foo', '10');
+    el.setAttribute('bar', 'attrBar');
+    await el.updateComplete;
+    assert.equal(el.foo, 20);
+    assert.equal(el.bar, 'attrBar');
+    el.foo = 5;
+    el.bar = undefined;
+    await el.updateComplete;
+    assert.equal(el.getAttribute('foo'), '5');
+    assert.isFalse(el.hasAttribute('bar'));
+  });
+
+  test('can customize property options and accessor creation', async () => {
+    interface MyPropertyDeclaration<TypeHint = unknown> extends
+        PropertyDeclaration {
+      validator?: (value: any) => TypeHint;
+      observer?: (oldValue: TypeHint) => void;
+    }
+
+    interface MyPropertyDeclarations {
+      readonly [key: string]: PropertyDeclaration|MyPropertyDeclaration;
+    }
+
+    const myProperty = (options: MyPropertyDeclaration) => property(options);
+
+    @customElement(generateElementName())
+    class E extends UpdatingElement {
+      static getPropertyDescriptor(
+          name: PropertyKey, key: string|symbol,
+          options: MyPropertyDeclaration) {
+        const defaultDescriptor =
+            super.getPropertyDescriptor(name, key, options);
+        return {
+          get: defaultDescriptor.get,
+          set(this: E, value: unknown) {
+            const oldValue =
+                (this as unknown as {[key: string]: unknown})[name as string];
+            if (options.validator) {
+              value = options.validator(value);
+            }
+            (this as unknown as {[key: string]: unknown})[key as string] =
+                value;
+            (this as unknown as UpdatingElement).requestUpdate(name, oldValue);
+          },
+
+          configurable: defaultDescriptor.configurable,
+          enumerable: defaultDescriptor.enumerable
+        };
+      }
+
+      updated(changedProperties: PropertyValues) {
+        super.updated(changedProperties);
+        changedProperties.forEach((value: unknown, key: PropertyKey) => {
+          const options = (this.constructor as typeof UpdatingElement)
+                              .getPropertyOptions(key) as MyPropertyDeclaration;
+          const observer = options.observer;
+          if (typeof observer === 'function') {
+            observer.call(this, value);
+          }
+        });
+      }
+
+      // provide custom deorator expecting extended type
+      @myProperty({
+        type: Number,
+        validator: (value: number) => Math.min(10, Math.max(value, 0))
+      })
+      foo = 5;
+
+      @property({}) bar = 'bar';
+
+      // tslint:disable-next-line:no-any
+      _observedZot?: any;
+
+      // tslint:disable-next-line:no-any
+      _observedZot2?: any;
+
+      // use regular decorator and cast to type
+      @property({
+        observer: function(this: E, oldValue: string) {
+          this._observedZot = {value: this.zot, oldValue};
+        }
+      } as PropertyDeclaration)
+      zot = '';
+
+      zot2 = '';
+
+      foo2 = 5;
+
+      // custom typed properties
+      static get properties(): MyPropertyDeclarations {
+        return {
+          // object cast as type
+          zot2: {
+            observer: function(this: E, oldValue: string) {
+              this._observedZot2 = {value: this.zot2, oldValue};
+            }
+          } as PropertyDeclaration,
+          // object satisfying defined custom type.
+          foo2: {
+            type: Number,
+            validator: (value: number) => Math.min(10, Math.max(value, 0))
+          }
+        };
+      }
+    }
+
+    const el = new E();
+    container.appendChild(el);
+    await el.updateComplete;
+    el.foo = 20;
+    el.foo2 = 20;
+    assert.equal(el.foo, 10);
+    assert.equal(el.foo2, 10);
+    assert.deepEqual(el._observedZot, {value: '', oldValue: undefined});
+    assert.deepEqual(el._observedZot2, {value: '', oldValue: undefined});
+    el.foo = -5;
+    el.foo2 = -5;
+    assert.equal(el.foo, 0);
+    assert.equal(el.foo2, 0);
+    el.bar = 'bar2';
+    assert.equal(el.bar, 'bar2');
+    el.zot = 'zot';
+    el.zot2 = 'zot';
+    await el.updateComplete;
+    assert.deepEqual(el._observedZot, {value: 'zot', oldValue: ''});
+    assert.deepEqual(el._observedZot2, {value: 'zot', oldValue: ''});
+  });
+
+  test('can customize properties to update synchronously', async () => {
+    interface MyPropertyDeclaration extends PropertyDeclaration {
+      sync: boolean;
+    }
+
+    @customElement(generateElementName())
+    class E extends UpdatingElement {
+      static getPropertyDescriptor(
+          name: PropertyKey, key: string|symbol,
+          options: MyPropertyDeclaration) {
+        const defaultDescriptor =
+            super.getPropertyDescriptor(name, key, options);
+        const setter = defaultDescriptor.set;
+        return Object.assign(defaultDescriptor, {
+          set(this: E, value: unknown) {
+            setter.call(this, value);
+            if (options.sync && this.hasUpdated && !this.isUpdating) {
+              (this as unknown as E).performUpdate();
+            }
+          }
+        });
+      }
+
+      isUpdating = false;
+
+      updateCount = 0;
+
+      performUpdate() {
+        // While it's dubious to have a computed property that's
+        // also settable but this just demonstrates it's possible.
+        this.isUpdating = true;
+        super.performUpdate();
+        this.isUpdating = false;
+      }
+
+      update(changedProperties: PropertyValues) {
+        this.zug = this.foo + 1;
+        super.update(changedProperties);
+      }
+
+      updated() {
+        this.updateCount++;
+      }
+
+      @property(
+          {type: Number, sync: true, reflect: true} as PropertyDeclaration)
+      foo = 5;
+
+      @property({type: Number, sync: true} as PropertyDeclaration)
+      zug = this.foo;
+
+      @property({}) bar = 'bar';
+    }
+
+    const el = new E();
+    container.appendChild(el);
+    await el.updateComplete;
+    el.foo = 10;
+    assert.equal(el.updateCount, 2);
+    el.foo = 1;
+    el.foo = 2;
+    assert.equal(el.updateCount, 4);
+    el.foo = 3;
+    await el.updateComplete;
+    assert.equal(el.updateCount, 5);
+    el.bar = 'bar2';
+    assert.equal(el.updateCount, 5);
+    await el.updateComplete;
+    assert.equal(el.updateCount, 6);
+    el.foo = 5;
+    assert.equal(el.updateCount, 7);
+    el.zug = 60;
+    assert.equal(el.updateCount, 8);
+  });
 
   test('attribute-based property storage', async () => {
     class E extends UpdatingElement {
